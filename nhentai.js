@@ -7,7 +7,7 @@ class Nhentai extends ComicSource {
     // unique id of the source
     key = "nhentai"
 
-    version = "1.1.2"
+    version = "1.1.3"
 
     minAppVersion = "1.0.0"
 
@@ -359,6 +359,27 @@ class Nhentai extends ComicSource {
         return access || session || csrf || null
     }
 
+    async getAccessToken() {
+        if (typeof Network.getCookies === "function") {
+            let cookies = await Network.getCookies(this.baseUrl)
+            let fromCookie = this.findCookieValue(cookies, "access_token")
+            if (fromCookie) return fromCookie
+        }
+        return this.loadData("accessToken") || null
+    }
+
+    // Post-SvelteKit migration, /api/v2/favorites and POST/DELETE
+    // /api/v2/galleries/{id}/favorite reject cookie-only auth with 401.
+    // Re-attaching the access_token as a Bearer header restores access.
+    async withAuth(headers) {
+        headers = headers || {}
+        let token = await this.getAccessToken()
+        if (token && !headers["Authorization"]) {
+            headers["Authorization"] = `Bearer ${token}`
+        }
+        return headers
+    }
+
     async deleteWithFallback(url, headers) {
         if (typeof Network.delete === "function") {
             return await Network.delete(url, headers, null)
@@ -630,34 +651,13 @@ class Nhentai extends ComicSource {
         addOrDelFavorite: async (comicId, folderId, isAdding) => {
             comicId = this.normalizeComicId(comicId)
             let v2Url = `${this.apiBaseUrl}/galleries/${comicId}/favorite`
-            let headers = {
-                "X-Requested-With": "XMLHttpRequest"
-            }
+            let headers = await this.withAuth({ "X-Requested-With": "XMLHttpRequest" })
             let res = isAdding
                 ? await Network.post(v2Url, headers, null)
                 : await this.deleteWithFallback(v2Url, headers)
-            if(res.status !== 200) {
-                // Fallback to legacy endpoint for cookie-based auth compatibility.
-                let info = await this.comic.loadInfo(comicId)
-                let token = info.csrfToken
-                let legacyUrl = `${this.baseUrl}/api/gallery/${comicId}/${isAdding ? "favorite" : "unfavorite"}`
-                let legacyRes = await Network.post(legacyUrl, {
-                    "X-CSRFToken": token,
-                    "Referer": `${this.baseUrl}/g/${comicId}/`,
-                    "X-Requested-With": "XMLHttpRequest"
-                }, null)
-                if (legacyRes.status === 200) {
-                    return true
-                }
-                if (legacyRes.status === 401) {
-                    throw "Login expired"
-                }
-                throw "Invalid Status Code: " + legacyRes.status
-            }
-            if(res.status === 200) {
-                return true
-            }
-            throw "Failed"
+            if (res.status === 200) return true
+            if (res.status === 401) throw "Login expired"
+            throw "Invalid Status Code: " + res.status
         },
         /**
          * load comics in a folder
@@ -668,7 +668,8 @@ class Nhentai extends ComicSource {
          */
         loadComics: async (page, folder) => {
             let apiUrl = `${this.apiBaseUrl}/favorites?page=${page}`
-            let apiRes = await Network.get(apiUrl, {})
+            let apiHeaders = await this.withAuth({})
+            let apiRes = await Network.get(apiUrl, apiHeaders)
             if (apiRes.status === 200) {
                 return this.parseComicListFromApi(JSON.parse(apiRes.body))
             }
