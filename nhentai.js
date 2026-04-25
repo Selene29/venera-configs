@@ -7,7 +7,7 @@ class Nhentai extends ComicSource {
     // unique id of the source
     key = "nhentai"
 
-    version = "1.1.1"
+    version = "1.1.2"
 
     minAppVersion = "1.0.0"
 
@@ -35,6 +35,13 @@ class Nhentai extends ComicSource {
                 return isNhentaiPage && !isLoginPage && !isRegisterPage
             },
             onLoginSuccess: async () => {
+                // Re-set cookies so the Network layer's cookie jar matches the WebView's,
+                // otherwise endpoints like /api/v2/favorites return 401 even though login
+                // succeeded. Source: PR #277 by falling7down.
+                if (typeof Network.getCookies === "function" && typeof Network.setCookies === "function") {
+                    let cookies = await Network.getCookies("https://nhentai.net")
+                    Network.setCookies("https://nhentai.net", cookies)
+                }
                 await this.persistAuthFromCookies()
             },
         },
@@ -67,7 +74,10 @@ class Nhentai extends ComicSource {
         let idMatch = href.match(regex);
         let id = idMatch ? idMatch.join('') : "";
         let tags = element.attributes["data-tags"] || "";
-        let lang = this.resolveLanguage({ tagIds: tags });
+        let lang = this.resolveLanguage({
+            tagIds: tags,
+            classNames: element.attributes?.["class"],
+        });
         let tagsRes = [];
         for (let tag of tags.split(" ")) {
             if (Nhentai.nhentaiTags[tag] != null) {
@@ -223,7 +233,16 @@ class Nhentai extends ComicSource {
         return Array.from(new Set(ids))
     }
 
-    resolveLanguage({ tagIds, apiTags } = {}) {
+    resolveLanguage({ tagIds, apiTags, classNames } = {}) {
+        // CSS-class detection — used by HTML scraping post-SvelteKit migration,
+        // where gallery elements still carry `lang-gb`/`lang-jp`/`lang-cn` but
+        // dropped the `data-tags` attribute. Source: PR #277 by falling7down.
+        if (typeof classNames === "string" && classNames) {
+            if (classNames.includes("lang-gb")) return "English"
+            if (classNames.includes("lang-jp")) return "日本語"
+            if (classNames.includes("lang-cn")) return "中文"
+        }
+
         // Tag-id based detection — uses exact match (avoids "6346" matching "63461").
         let ids = this.normalizeTagIds(tagIds)
         if (ids.includes("12227")) return "English"
@@ -712,7 +731,9 @@ class Nhentai extends ComicSource {
                     .map(p => this.toAbsoluteMediaUrl(p.thumbnail, true))
                     .filter(Boolean)
                 if (thumbnails.length === 0) {
-                    let pagesRes = await Network.get(`${this.apiBaseUrl}/galleries/${id}/pages`, {})
+                    // /pages sub-endpoint returns 404 since the SvelteKit migration —
+                    // call /galleries/{id} (no include) for a clean pages array.
+                    let pagesRes = await Network.get(`${this.apiBaseUrl}/galleries/${id}`, {})
                     if (pagesRes.status === 200) {
                         let pagesData = JSON.parse(pagesRes.body)
                         thumbnails = (pagesData.pages || [])
@@ -872,7 +893,7 @@ class Nhentai extends ComicSource {
                     avatar: this.toAbsoluteMediaUrl(c.poster.avatar_url, false),
                     content: c.body,
                     time: typeof c.post_date === "number"
-                        ? new Date(c.post_date * 1000).toISOString()
+                        ? this.formatTimestamp(c.post_date)
                         : String(c.post_date),
                 })
             })
