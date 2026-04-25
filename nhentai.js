@@ -7,7 +7,7 @@ class Nhentai extends ComicSource {
     // unique id of the source
     key = "nhentai"
 
-    version = "1.1.3"
+    version = "1.1.4"
 
     minAppVersion = "1.0.0"
 
@@ -368,14 +368,29 @@ class Nhentai extends ComicSource {
         return this.loadData("accessToken") || null
     }
 
+    async getCsrfToken() {
+        if (typeof Network.getCookies === "function") {
+            let cookies = await Network.getCookies(this.baseUrl)
+            let fromCookie = this.findCookieValue(cookies, "csrftoken")
+            if (fromCookie) return fromCookie
+        }
+        return this.loadData("csrftoken") || null
+    }
+
     // Post-SvelteKit migration, /api/v2/favorites and POST/DELETE
-    // /api/v2/galleries/{id}/favorite reject cookie-only auth with 401.
-    // Re-attaching the access_token as a Bearer header restores access.
+    // /api/v2/galleries/{id}/favorite still 401 with cookie-only auth even
+    // after attaching Authorization: Bearer <access_token>. The mutating
+    // endpoints additionally require X-CSRFToken (Django CSRF middleware
+    // standard pattern), matching the value of the csrftoken cookie.
     async withAuth(headers) {
         headers = headers || {}
         let token = await this.getAccessToken()
         if (token && !headers["Authorization"]) {
             headers["Authorization"] = `Bearer ${token}`
+        }
+        let csrf = await this.getCsrfToken()
+        if (csrf && !headers["X-CSRFToken"]) {
+            headers["X-CSRFToken"] = csrf
         }
         return headers
     }
