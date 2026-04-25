@@ -7,12 +7,12 @@ class Nhentai extends ComicSource {
     // unique id of the source
     key = "nhentai"
 
-    version = "1.0.8"
+    version = "1.1.0"
 
     minAppVersion = "1.0.0"
 
     // update url
-    url = "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/nhentai.js"
+    url = "https://raw.githubusercontent.com/Selene29/venera-configs/main/nhentai.js"
 
     baseUrl = "https://nhentai.net"
     apiBaseUrl = "https://nhentai.net/api/v2"
@@ -24,7 +24,18 @@ class Nhentai extends ComicSource {
         loginWithWebview: {
             url: "https://nhentai.net/login/?next=/",
             checkStatus: (url, title) => {
-                return url === "https://nhentai.net/"
+                if (!url) {
+                    return false
+                }
+                let normalizedUrl = url.toLowerCase()
+                let isNhentaiPage = normalizedUrl.startsWith("https://nhentai.net/")
+                    || normalizedUrl.startsWith("https://www.nhentai.net/")
+                let isLoginPage = normalizedUrl.includes("/login")
+                let isRegisterPage = normalizedUrl.includes("/register")
+                return isNhentaiPage && !isLoginPage && !isRegisterPage
+            },
+            onLoginSuccess: async () => {
+                await this.persistAuthFromCookies()
             },
         },
 
@@ -33,6 +44,9 @@ class Nhentai extends ComicSource {
          */
         logout: () => {
             Network.deleteCookies('https://nhentai.net')
+            this.deleteData("accessToken")
+            this.deleteData("csrftoken")
+            this.deleteData("sessionid")
         },
 
         // {string?} - register url
@@ -52,15 +66,8 @@ class Nhentai extends ComicSource {
         let href = element.querySelector("a")?.attributes?.["href"] || "";
         let idMatch = href.match(regex);
         let id = idMatch ? idMatch.join('') : "";
-        let lang = "Unknown";
         let tags = element.attributes["data-tags"] || "";
-        if (tags.includes("12227")) {
-            lang = "English";
-        } else if (tags.includes("6346")) {
-            lang = "日本語";
-        } else if (tags.includes("29963")) {
-            lang = "中文";
-        }
+        let lang = this.resolveLanguage({ tagIds: tags });
         let tagsRes = [];
         for (let tag of tags.split(" ")) {
             if (Nhentai.nhentaiTags[tag] != null) {
@@ -137,15 +144,8 @@ class Nhentai extends ComicSource {
     }
 
     parseComicFromApi(item) {
-        let lang = "Unknown";
         let tagIds = item.tag_ids || [];
-        if (tagIds.includes(12227)) {
-            lang = "English";
-        } else if (tagIds.includes(6346)) {
-            lang = "日本語";
-        } else if (tagIds.includes(29963)) {
-            lang = "中文";
-        }
+        let lang = this.resolveLanguage({ tagIds: tagIds, apiTags: item.tags });
         let tagsRes = [];
         for (let tagId of tagIds) {
             let tag = Nhentai.nhentaiTags[String(tagId)];
@@ -197,6 +197,82 @@ class Nhentai extends ComicSource {
                 if (!tagType) return "Tags"
                 return tagType.charAt(0).toUpperCase() + tagType.slice(1)
         }
+    }
+
+    normalizeTagIds(tagIds) {
+        let parts = []
+        if (Array.isArray(tagIds)) {
+            parts = tagIds.map((id) => String(id))
+        } else if (typeof tagIds === "string") {
+            parts = tagIds.split(/[\s,]+/).map((id) => id.trim())
+        } else if (tagIds != null && typeof tagIds === "object") {
+            if (Array.isArray(tagIds.ids)) {
+                parts = tagIds.ids.map((id) => String(id))
+            } else {
+                parts = Object.keys(tagIds).map((id) => String(id))
+            }
+        }
+        let ids = []
+        for (let raw of parts) {
+            let value = String(raw || "").trim()
+            if (!value) continue
+            if (/^\d+$/.test(value)) { ids.push(value); continue }
+            let matches = value.match(/\d+/g)
+            if (matches && matches.length > 0) { ids.push(...matches); continue }
+        }
+        return Array.from(new Set(ids))
+    }
+
+    resolveLanguage({ tagIds, apiTags } = {}) {
+        // Tag-id based detection — uses exact match (avoids "6346" matching "63461").
+        let ids = this.normalizeTagIds(tagIds)
+        if (ids.includes("12227")) return "English"
+        if (ids.includes("6346")) return "日本語"
+        if (ids.includes("29963")) return "中文"
+
+        // API-tag-object fallback: look for any tag with type==="language".
+        if (Array.isArray(apiTags)) {
+            for (let tag of apiTags) {
+                if (!tag || typeof tag !== "object") continue
+                if (String(tag.type || "").toLowerCase() !== "language") continue
+                let name = String(tag.name || "").toLowerCase()
+                if (name === "english") return "English"
+                if (name === "japanese") return "日本語"
+                if (name === "chinese") return "中文"
+            }
+        }
+        return "Unknown"
+    }
+
+    findCookieValue(cookies, name) {
+        if (!cookies) return null
+        if (Array.isArray(cookies)) {
+            for (let c of cookies) {
+                if (!c) continue
+                if (c.name === name && c.value != null) return c.value
+            }
+            return null
+        }
+        if (typeof cookies === "object" && cookies[name] != null) {
+            return cookies[name]
+        }
+        if (typeof cookies === "string") {
+            let match = cookies.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`))
+            return match ? match[1] : null
+        }
+        return null
+    }
+
+    async persistAuthFromCookies() {
+        if (typeof Network.getCookies !== "function") return null
+        let cookies = await Network.getCookies(this.baseUrl)
+        let access = this.findCookieValue(cookies, "access_token")
+        let csrf = this.findCookieValue(cookies, "csrftoken")
+        let session = this.findCookieValue(cookies, "sessionid")
+        if (access) this.saveData("accessToken", access)
+        if (csrf) this.saveData("csrftoken", csrf)
+        if (session) this.saveData("sessionid", session)
+        return access || session || csrf || null
     }
 
     async deleteWithFallback(url, headers) {
