@@ -7,12 +7,12 @@ class Wnacg extends ComicSource {
     // unique id of the source
     key = "wnacg"
 
-    version = "1.0.4"
+    version = "1.0.5"
 
     minAppVersion = "1.0.0"
 
     // update url
-    url = "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/wnacg.js"
+    url = "https://raw.githubusercontent.com/Selene29/venera-configs/main/wnacg.js"
 
     static domains = [];
 
@@ -723,35 +723,42 @@ class Wnacg extends ComicSource {
         },
     }
 
-    settings = {
-        refreshDomains: {
-            title: "Refresh Domain List",
-            type: "callback",
-            buttonText: "Refresh",
-            callback: () => this.refreshDomains(true)
-        },
-        refreshDomainsOnStart: {
-            title: "Refresh Domain List on Startup",
-            type: "switch",
-            default: true,
-        },
-        domainSelection: {
-            title: "Domain Selection",
-            type: "select",
-            options: [
-                { value: '0', text: 'Custom Domain' },
-                { value: '1', text: 'Domain 1' },
-                { value: '2', text: 'Domain 2' },
-                { value: '3', text: 'Domain 3' }
-            ],
-            default: "0",
-        },
-        domain0: {
-            title: "Custom Domain",
-            type: "input",
-            validator: String.raw`^(?!:\/\/)(?=.{1,253})([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$`,
-            default: 'wnacg.com',
-        },
+    get settings() {
+        // Build domainSelection options dynamically from the fetched Wnacg.domains
+        // so the dropdown reflects the actual available mirrors instead of stale "Domain 1/2/3" labels.
+        let domainOptions = [{ value: '0', text: 'Custom Domain' }]
+        for (let i = 0; i < Wnacg.domains.length; i++) {
+            domainOptions.push({
+                value: String(i + 1),
+                text: Wnacg.domains[i],
+            })
+        }
+
+        return {
+            refreshDomains: {
+                title: "Refresh Domain List",
+                type: "callback",
+                buttonText: "Refresh",
+                callback: () => this.refreshDomains(true)
+            },
+            refreshDomainsOnStart: {
+                title: "Refresh Domain List on Startup",
+                type: "switch",
+                default: true,
+            },
+            domainSelection: {
+                title: "Domain Selection",
+                type: "select",
+                options: domainOptions,
+                default: "0",
+            },
+            domain0: {
+                title: "Custom Domain",
+                type: "input",
+                validator: String.raw`^(?!:\/\/)(?=.{1,253})([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$`,
+                default: 'wnacg.com',
+            },
+        }
     }
 
     translation = {
