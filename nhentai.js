@@ -7,7 +7,7 @@ class Nhentai extends ComicSource {
     // unique id of the source
     key = "nhentai"
 
-    version = "1.1.0"
+    version = "1.1.1"
 
     minAppVersion = "1.0.0"
 
@@ -263,6 +263,71 @@ class Nhentai extends ComicSource {
         return null
     }
 
+    decodeHtmlAttribute(text) {
+        return String(text || "")
+            .replace(/&amp;/g, "&")
+            .replace(/&quot;/g, "\"")
+            .replace(/&#39;/g, "'")
+            .replace(/&lt;/g, "<")
+            .replace(/&gt;/g, ">")
+    }
+
+    extractImagesFromGalleryPayload(payload) {
+        if (!payload) return []
+        // Format A — explicit paths: {pages: [{path: "galleries/X/N.jpg"}, ...]}
+        if (Array.isArray(payload.pages) && payload.pages[0]?.path) {
+            return payload.pages
+                .map((p) => this.toAbsoluteMediaUrl(p?.path || "", false))
+                .filter(Boolean)
+        }
+        let mediaId = payload.media_id || payload.mediaId
+        if (!mediaId) return []
+        // Format B — type-tagged: {media_id, images: {pages: [{t: "j"}, ...]}}
+        // Format C — type-tagged top-level: {media_id, pages: [{t: "j"}, ...]}
+        let typedPages = Array.isArray(payload.images?.pages)
+            ? payload.images.pages
+            : (Array.isArray(payload.pages) && payload.pages[0]?.t != null ? payload.pages : null)
+        if (!typedPages) return []
+        let result = []
+        for (let page of typedPages) {
+            let ext = "jpg"
+            switch (page?.t) {
+                case "p": ext = "png"; break
+                case "g": ext = "gif"; break
+                case "w": ext = "webp"; break
+            }
+            result.push(`${this.imageServer}/galleries/${mediaId}/${result.length + 1}.${ext}`)
+        }
+        return result
+    }
+
+    // Extract gallery JSON embedded in nhentai's SvelteKit-rendered detail page.
+    // Used as a last-resort fallback when both /galleries/{id}/pages and /galleries/{id} APIs fail.
+    extractEmbeddedGalleryDetail(html, comicId) {
+        let id = String(comicId || "")
+        let scriptRegex = /<script[^>]*type="application\/json"[^>]*data-sveltekit-fetched[^>]*data-url="([^"]+)"[^>]*>([\s\S]*?)<\/script>/gi
+        let best = null
+        let match
+        while ((match = scriptRegex.exec(String(html || ""))) != null) {
+            let dataUrl = this.decodeHtmlAttribute(match[1] || "")
+            if (!dataUrl.includes(`/api/v2/galleries/${id}`)) continue
+            let wrapper
+            try { wrapper = JSON.parse(match[2] || "") } catch (e) { continue }
+            let payload
+            try {
+                payload = typeof wrapper?.body === "string" ? JSON.parse(wrapper.body) : wrapper?.body
+            } catch (e) { payload = null }
+            if (!payload || typeof payload !== "object") continue
+            let score = 0
+            if (String(payload.id || "") === id) score += 120
+            if (Array.isArray(payload.pages)) score += 100
+            if (payload.images?.pages) score += 80
+            if (payload.media_id != null) score += 30
+            if (best == null || score > best.score) best = { score: score, payload: payload }
+        }
+        return best?.payload || null
+    }
+
     async persistAuthFromCookies() {
         if (typeof Network.getCookies !== "function") return null
         let cookies = await Network.getCookies(this.baseUrl)
@@ -361,12 +426,39 @@ class Nhentai extends ComicSource {
              * @returns {{}}
              */
             load: async (page) => {
+                // Primary path: API listing — returns proper `tag_ids` so language detection works.
+                // The SvelteKit-rendered HTML homepage no longer carries `data-tags` on gallery elements,
+                // which made the legacy HTML scraping path resolve every entry to "Unknown".
+                let apiUrl = `${this.apiBaseUrl}/galleries?page=${page || 1}`
+                let apiRes = await Network.get(apiUrl, {})
+                if (apiRes.status === 200) {
+                    let parsed = this.parseComicListFromApi(JSON.parse(apiRes.body))
+                    let data = []
+                    // Best-effort "Popular" curation on page 1 from the legacy HTML, if it's still rendered.
+                    if (!page || page === 1) {
+                        try {
+                            let htmlRes = await Network.get(this.baseUrl, {})
+                            if (htmlRes.status === 200) {
+                                let doc = new HtmlDocument(htmlRes.body)
+                                let popular = doc.querySelectorAll("div.container.index-container.index-popular > div.gallery").map(e => this.parseComic(e))
+                                if (popular.length > 0) {
+                                    data.push({ title: "Popular", comics: popular })
+                                }
+                                doc.dispose?.()
+                            }
+                        } catch (e) { /* ignore — popular section is best-effort */ }
+                    }
+                    data.push(parsed.comics)
+                    return { data: data, maxPage: parsed.maxPage || 20000 }
+                }
+
+                // Fallback: legacy HTML scraping path (kept for completeness if the API ever 4xx's).
                 let url = this.baseUrl
-                if(page && page !== 1) {
+                if (page && page !== 1) {
                     url = `${url}?page=${page}`
                 }
                 let res = await Network.get(url, {})
-                if(res.status !== 200) {
+                if (res.status !== 200) {
                     throw "Invalid Status Code: " + res.status
                 }
                 let doc = new HtmlDocument(res.body)
@@ -378,7 +470,7 @@ class Nhentai extends ComicSource {
                     })
                 }
                 let latest = doc.querySelectorAll("div.container.index-container > div.gallery").map(e => this.parseComic(e))
-                if(url === this.baseUrl) {
+                if (url === this.baseUrl) {
                     latest = latest.slice(data[0].comics.length)
                 }
                 data.push(latest)
@@ -726,47 +818,38 @@ class Nhentai extends ComicSource {
         loadEp: async (comicId, epId) => {
             comicId = this.normalizeComicId(comicId)
 
+            // Primary: dedicated /pages endpoint (returns 404 since the SvelteKit migration).
             let apiRes = await Network.get(`${this.apiBaseUrl}/galleries/${comicId}/pages`, {})
             if (apiRes.status === 200) {
-                let apiData = JSON.parse(apiRes.body)
-                let images = (apiData.pages || []).map(p => this.toAbsoluteMediaUrl(p.path, false))
+                let images = this.extractImagesFromGalleryPayload(JSON.parse(apiRes.body))
                 if (images.length > 0) {
                     return { images: images }
                 }
             }
 
+            // Fallback A: full gallery detail — still serves images.pages post-migration.
+            let detailRes = await Network.get(`${this.apiBaseUrl}/galleries/${comicId}`, {})
+            if (detailRes.status === 200) {
+                let images = this.extractImagesFromGalleryPayload(JSON.parse(detailRes.body))
+                if (images.length > 0) {
+                    return { images: images }
+                }
+            }
+
+            // Fallback B: parse the SvelteKit-embedded JSON from the gallery page HTML.
             let res = await Network.get(`${this.baseUrl}/g/${comicId}/1/`, {})
-            if(res.status !== 200) {
+            if (res.status !== 200) {
                 throw "Invalid Status Code: " + res.status
             }
-            let document = new HtmlDocument(res.body)
-            let script = document.querySelectorAll("script").find((e) => {
-                return e.text.includes("window._gallery")
-            }).text
-            let json = script.split('JSON.parse("')[1].split('");')[0]
-            let decodedJsonText =
-                json.replaceAll("\\u0022", "\"").replaceAll("\\u005C", "\\");
-            let data = JSON.parse(decodedJsonText)
-            let mediaId = data.media_id
-            let images = []
-            for (let image of data.images.pages) {
-                let ext = 'jpg'
-                switch(image.t) {
-                    case 'p':
-                        ext = 'png'
-                        break
-                    case 'g':
-                        ext = 'gif'
-                        break
-                    case 'w':
-                        ext = 'webp'
-                        break
+            let embedded = this.extractEmbeddedGalleryDetail(res.body, comicId)
+            if (embedded) {
+                let images = this.extractImagesFromGalleryPayload(embedded)
+                if (images.length > 0) {
+                    return { images: images }
                 }
-                images.push(`https://i3.nhentai.net/galleries/${mediaId}/${images.length + 1}.${ext}`)
             }
-            return {
-                images: images,
-            }
+
+            throw "Failed to parse gallery images"
         },
         /**
          * [Optional] load comments
